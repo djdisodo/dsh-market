@@ -37,7 +37,7 @@ const HOST = '127.0.0.1:3080'
  * Mount the market routes against a stub host. The returned `routes` map is
  * keyed by path so tests can invoke each handler directly.
  */
-function mount(commandRuntime?: PluginCommandRuntime): { host: MarketHost; routes: Map<string, RouteHandler> } {
+function mount(commandRuntime?: PluginCommandRuntime, trustedHosts: string[] = []): { host: MarketHost; routes: Map<string, RouteHandler> } {
   const routes = new Map<string, RouteHandler>()
   const host: MarketHost = {
     webServer: {
@@ -49,6 +49,8 @@ function mount(commandRuntime?: PluginCommandRuntime): { host: MarketHost; route
     // No loader entries and no hot-mounting in these contract tests.
     loader: { entries: () => [] },
     plugin: () => ({ await: async () => undefined, dispose: async () => undefined }),
+    // The host's own declaration, as @deepseek-ai/dsh-web-app publishes it.
+    get: name => (name === 'webRuntime' ? { trustedHosts } : undefined),
   }
   mountMarketRoutes(host, { profile: 'web' }, commandRuntime)
   return { host, routes }
@@ -135,6 +137,22 @@ const jsonBody = (res: Captured): Record<string, unknown> => res.json() as Recor
 /** Same-origin POST options (success-path default). */
 function post(path: string, body: unknown): RequestOpts {
   return { method: 'POST', url: path, origin: ORIGIN, host: HOST, body }
+}
+
+/**
+ * Run `body` with these arguments appended to this process's argv, the way
+ * `dsh web --trusted-host <name>` supplies the authorities it serves.
+ * Restored even when the body throws, so a failing assertion cannot leak a
+ * declaration into the tests after it.
+ */
+async function withArgv<T>(args: string[], body: () => T | Promise<T>): Promise<T> {
+  const original = process.argv
+  process.argv = [...original, ...args]
+  try {
+    return await body()
+  } finally {
+    process.argv = original
+  }
 }
 
 /**
@@ -276,6 +294,20 @@ describe('origin enforcement (POST routes)', () => {
     writeStandardProfile()
     const res = await hit(routes, '/dsh-market/bundle-order', post('/dsh-market/bundle-order', { order: ['beta', 'alpha'] }))
     expect(res.status).toBe(200)
+  })
+
+  it('lets a POST from an authority the host published reach the route', async () => {
+    // `dsh web --trusted-host <name>` behind nginx: `proxy_set_header Host
+    // $http_host` forwards the name the browser typed, so the browser's own
+    // authority has to be one the fence accepts or every mutation answers 403
+    // while every read keeps working. `not.toBe(403)` rather than 200: this
+    // fixture may fail the request for its own reasons, and the assertion is
+    // about the origin gate.
+    const proxied = mount(undefined, ['dsh.example.org'])
+    const res = await hit(proxied.routes, '/dsh-market/bundle-order', {
+      method: 'POST', url: '/dsh-market/bundle-order', host: 'dsh.example.org', origin: 'https://dsh.example.org', body: { order: [] },
+    })
+    expect(res.status).not.toBe(403)
   })
 })
 
@@ -771,6 +803,35 @@ describe('sameOrigin', () => {
     for (const origin of ['not a url', '://', 'http://', '']) {
       expect(sameOrigin(req({ host: '127.0.0.1:3080', origin })), origin).toBe(false)
     }
+  })
+
+  it('accepts a Host the deployment declared, because that is what a proxy forwards (#678)', () => {
+    const declared = ['dsh.example.org', '192.168.0.194']
+    // Undeclared first: this is the behaviour the change switches on.
+    expect(sameOrigin(req({ host: 'dsh.example.org', origin: 'https://dsh.example.org' }))).toBe(false)
+    expect(sameOrigin(req({ host: 'dsh.example.org', origin: 'https://dsh.example.org' }), declared)).toBe(true)
+    // A port-less declaration covers the port the proxy forwards.
+    expect(sameOrigin(req({ host: 'dsh.example.org:8443', origin: 'https://dsh.example.org:8443' }), declared)).toBe(true)
+    expect(sameOrigin(req({ host: '192.168.0.194:3080', origin: 'http://192.168.0.194:3080' }), declared)).toBe(true)
+    // Nothing about the request can add itself: the rebinding page names
+    // itself in Host AND Origin, and no declaration matches.
+    expect(sameOrigin(req({ host: 'evil.example', origin: 'http://evil.example' }), declared)).toBe(false)
+    expect(sameOrigin(req({ host: 'dsh.example.org.evil.example', origin: 'http://dsh.example.org.evil.example' }), declared)).toBe(false)
+    // A cross-site page against a declared host is still cross-site, and a
+    // declaration carrying a port matches that port only.
+    expect(sameOrigin(req({ host: 'dsh.example.org', origin: 'https://evil.example' }), declared)).toBe(false)
+    expect(sameOrigin(req({ host: 'dsh.example.org:9443', origin: 'https://dsh.example.org:9443' }), ['dsh.example.org:8443'])).toBe(false)
+    expect(sameOrigin(req({ host: 'dsh.example.org:8443', origin: 'https://dsh.example.org:8443' }), ['dsh.example.org:8443'])).toBe(true)
+  })
+
+  it("falls back to the --trusted-host flags this process was launched with", async () => {
+    await withArgv(['--trusted-host', 'dsh.example.org', '--trusted-host=ported.example:8443'], () => {
+      expect(sameOrigin(req({ host: 'dsh.example.org', origin: 'https://dsh.example.org' }))).toBe(true)
+      expect(sameOrigin(req({ host: 'dsh.example.org:8443', origin: 'https://dsh.example.org:8443' }))).toBe(true)
+      expect(sameOrigin(req({ host: 'ported.example:8443', origin: 'https://ported.example:8443' }))).toBe(true)
+      expect(sameOrigin(req({ host: 'ported.example:9443', origin: 'https://ported.example:9443' }))).toBe(false)
+      expect(sameOrigin(req({ host: 'evil.example', origin: 'http://evil.example' }))).toBe(false)
+    })
   })
 })
 describe('GET/POST /dsh-market/snapshots', () => {

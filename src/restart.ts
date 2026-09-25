@@ -10,7 +10,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { loopbackAuthority } from './http.ts'
+import { hostAuthority } from './http.ts'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import inspector from 'node:inspector'
 import { tmpdir } from 'node:os'
@@ -208,7 +208,7 @@ export function trustedRestartRequest(request: Pick<IncomingMessage, 'headers' |
   // through a name it controls, so the address proves nothing and Host/Origin
   // both carry the attacker's domain (#678). Host is what the attack cannot
   // forge, so it has to name a loopback authority.
-  if (!loopbackAuthority(host)) return false
+  if (!hostAuthority(host)) return false
   if (origin === undefined || host === undefined) return false
   try {
     const parsed = new URL(origin)
@@ -236,7 +236,7 @@ export function trustedDownloadRequest(request: Pick<IncomingMessage, 'headers' 
   const origin = request.headers.origin
   const host = request.headers.host
   // Same rebinding rule as the restart fence above (#678).
-  if (!loopbackAuthority(host)) return false
+  if (!hostAuthority(host)) return false
   if (origin === undefined) return true // plain browser download navigation
   try {
     const parsed = new URL(origin)

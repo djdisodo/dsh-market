@@ -51,7 +51,7 @@ import { acceleratedTarget, resolveHeadCommit } from './accelerate.ts'
 import { updateNotesFor } from './changelog.ts'
 import { checkUpdates, compareVersions, fetchNpmLatest, invalidateUpdates, resolveGitRemoteHead, isUpgrade, latestPublishedRecently, setUpdateRegistry, versionOnChannel } from './updates.ts'
 import { createThemeManager, type LoaderEntry } from './themes.ts'
-import { readJsonBody, sameOrigin, sendJson } from './http.ts'
+import { publishedAuthorities, readJsonBody, sameOrigin as baseSameOrigin, sendJson } from './http.ts'
 import { detectedDebugger, detectedSupervisor, restartAllowed, scheduleRestart, servingPort, trustedRestartRequest, trustedDownloadRequest, type RecoveryHandoffConfig } from './restart.ts'
 import type { RecoveryPlugin } from './recovery.ts'
 import { activationAfterReplace, brokenClientBundles, checkClientBundle, hasHostHalf, newlyBrokenBundles, verifyActivation } from './verify.ts'
@@ -107,6 +107,8 @@ export interface MarketHost {
   plugin(plugin: unknown, config: unknown): { await(): Promise<unknown>; dispose(): Promise<unknown> | void }
   on?(event: string, callback: (fiber: { entry?: { options?: { name?: string } } }) => void): () => void
   logger?: { info?(message: string): void; warn(message: string): void }
+  /** Service lookup, for the authorities this deployment fences its /api with. */
+  get?(name: string): unknown
 }
 
 /**
@@ -322,6 +324,13 @@ export function mountMarketRoutes(
     logEvent('error', 'mount', message)
     throw new Error(message)
   }
+  // The fence every mutating route calls, bound to the authorities this
+  // deployment declared (#678): a reverse proxy forwards the browser's own
+  // authority in Host, so a loopback-only fence refused the page the market
+  // was serving. Read per request from the host's declaration — a host that
+  // publishes none falls back to this process's argv, inside hostAuthority.
+  const sameOrigin = (request: IncomingMessage): boolean =>
+    baseSameOrigin(request, publishedAuthorities(host.get?.('webRuntime')))
   const activeProfileDir = profileDir(config.profile, config.profileDirectory)
   const analyzeActiveProfile = () => analyzeProfile(activeProfileDir, {
     ...(config.dshInstallDir === undefined ? {} : { dshInstallDir: config.dshInstallDir }),

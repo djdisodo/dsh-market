@@ -47,31 +47,75 @@ export function sendJson(response: ServerResponse, status: number, payload: unkn
  * @returns whether the request may mutate market state.
  */
 /**
- * Whether a `Host` header names a loopback authority (#678).
+ * Whether a `Host` header names an authority this deployment serves: the
+ * loopback listener, or one it declared (#678).
  *
  * `Origin === Host` alone does not stop a DNS-rebinding page: the attacker
  * serves their page from `evil.com`, resolves that name to 127.0.0.1, and
  * the browser then connects to the loopback listener while sending
  * `Origin: http://evil.com` AND `Host: evil.com` — an equality that holds
  * for the attacker. `Host` is the one header the attack cannot forge, so it
- * is what has to name a loopback authority.
+ * is what has to name an authority HERE. Loopback alone is not enough either:
+ * `dsh web --trusted-host <name>` exists so a GUI behind a reverse proxy, a
+ * LAN name or a tunnel can be used at all, and that proxy forwards the
+ * authority the browser typed — refusing it answered 403 `untrusted origin`
+ * on the very page the market was serving.
  *
- * `localhost` is included because browsers and RFC 6761 pin it to loopback;
- * a subdomain like `localhost.evil.com` does not match, and the port is
- * dropped before comparing.
+ * Declarations come from the deployment, never from the request: a rebinding
+ * page can only offer its own name, which is in none of them. `declared` is
+ * the host's own list (the complete one); this process's argv is the fallback
+ * for a composition that publishes none, and is where `--trusted-host` is
+ * written down.
+ *
+ * A declaration without a port matches that hostname on any port — the port a
+ * proxy forwards is not the port the market listens on — while one carrying a
+ * port matches exactly. `localhost` is included because browsers and RFC 6761
+ * pin it to loopback; a subdomain like `localhost.evil.com` does not match.
  *
  * @param host - the request's `Host` header.
- * @returns whether it names a loopback authority.
+ * @param declared - authorities the host published, if it published any.
+ * @returns whether it names an authority this deployment serves.
  */
-export function loopbackAuthority(host: string | undefined): boolean {
+export function hostAuthority(host: string | undefined, declared: readonly string[] = []): boolean {
   if (host === undefined) return false
   const lower = host.toLowerCase()
   // IPv6 literals keep their brackets; `[::1]:3080` → `[::1]`.
   const name = lower.startsWith('[') ? lower.slice(0, lower.indexOf(']') + 1) : lower.split(':')[0]!
-  return name === '127.0.0.1' || name === 'localhost' || name === '[::1]'
+  if (name === '127.0.0.1' || name === 'localhost' || name === '[::1]') return true
+  return [...declared, ...argumentAuthorities()].some((entry) => {
+    const value = entry.trim().toLowerCase()
+    if (value === '') return false
+    return value === lower || (!value.includes(':') && value === name)
+  })
 }
 
-export function sameOrigin(request: IncomingMessage): boolean {
+/** `--trusted-host <value>` and `--trusted-host=<value>` on this process's argv. */
+function argumentAuthorities(): string[] {
+  const values: string[] = []
+  const argv = process.argv
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!
+    if (argument === '--trusted-host') {
+      const value = argv[index + 1]
+      if (value !== undefined) values.push(value)
+    } else if (argument.startsWith('--trusted-host=')) {
+      values.push(argument.slice('--trusted-host='.length))
+    }
+  }
+  return values
+}
+
+/**
+ * The non-loopback authorities a host publishes on its `webRuntime` service
+ * (`{ lanAddresses, trustedHosts }`), read structurally — a host that
+ * publishes none, or publishes something malformed, contributes nothing.
+ */
+export function publishedAuthorities(source: unknown): readonly string[] {
+  const list = (source as { trustedHosts?: unknown } | undefined)?.trustedHosts
+  return Array.isArray(list) ? list.filter((entry): entry is string => typeof entry === 'string') : []
+}
+
+export function sameOrigin(request: IncomingMessage, declared: readonly string[] = []): boolean {
   // The rebinding defence (#678): a page on `evil.com` aimed at 127.0.0.1
   // sends a matching Origin/Host pair, so the equality below cannot see the
   // attack — Host is what it cannot forge.
@@ -83,7 +127,7 @@ export function sameOrigin(request: IncomingMessage): boolean {
   // authority is only checked when it is present, and a rebinding page can
   // never reach the branch that skips it.
   const host = request.headers.host
-  if (host !== undefined && !loopbackAuthority(host)) return false
+  if (host !== undefined && !hostAuthority(host, declared)) return false
   const origin = request.headers.origin
   // A missing Origin is not a cross-site request: browsers send it on every
   // POST, same-origin included, so its absence means the caller is not a
